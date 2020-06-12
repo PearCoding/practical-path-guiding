@@ -50,3 +50,7 @@
 
 *.vcxproj.user
 /.vscode
+
+/*/CMakeFiles/*
+Makefile
+CMakeCache.txt

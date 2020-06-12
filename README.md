@@ -2,6 +2,21 @@
 
 This repository contains the authors' implementation of the guided unidirectional path tracer of the research paper ["Practical Path Guiding for Efficient Light-Transport Simulation" [Müller et al. 2017]](https://tom94.net) as well as several improvements to the algorithm that were presented in [chapter 10 of the "Path Guiding in Production" SIGGRAPH'19 course](https://tom94.net). It also includes a visualization tool for the SD-Trees learned by the guided path tracer. The guided path tracer has been implemented in the [Mitsuba Physically Based Renderer](http://mitsuba-renderer.org) and the visualization tool with the [nanogui](https://github.com/wjakob/nanogui) library.
 
+### Changes in this fork
+
+This fork added different optimizers (Adam, AdaMax, AsdGrad, SGD and Nadam). Most of the optimizers are base on the article at https://towardsdatascience.com/adam-latest-trends-in-deep-learning-optimization-6be9a291375c . Simple runs show that with the same parameter set (esp. learning rate=0.001) Adam still outshines the other optimizers, but a real indepth test with reference pictures and PSNR comparisons are missing.
+
+Available optimizers can be selected inside the integrator as:
+```xml
+<string name="optimizer" value="adam"/>
+<string name="optimizer" value="adamax"/>
+<string name="optimizer" value="amsgrad"/>
+<string name="optimizer" value="nadam"/>
+<string name="optimizer" value="sgd"/>
+```
+
+Kingma, Diederik P. and Jimmy Ba. “Adam: A Method for Stochastic Optimization.” CoRR abs/1412.6980 (2015): n. pag.
+
 ### No Support for Participating Media
 
 The guided path tracer in this repository was not designed to handle participating media, although it could potentially be extended with little effort. In its current state, scenes containing participating media might converge slowly or not to the correct result at all.

@@ -66,19 +66,20 @@ inline Float logistic(Float x) {
 }
 
 // Implements the stochastic-gradient-based Adam optimizer [Kingma and Ba 2014]
-class AdamOptimizer {
+template<typename Parent>
+class AdamBaseOptimizer {
 public:
-    AdamOptimizer(Float learningRate, int batchSize = 1, Float epsilon = 1e-08f, Float beta1 = 0.9f, Float beta2 = 0.999f) {
+    AdamBaseOptimizer(Float learningRate, int batchSize = 1, Float epsilon = 1e-08f, Float beta1 = 0.9f, Float beta2 = 0.999f) {
 		m_hparams = { learningRate, batchSize, epsilon, beta1, beta2 };
 	}
 
-    AdamOptimizer& operator=(const AdamOptimizer& arg) {
+    AdamBaseOptimizer& operator=(const AdamBaseOptimizer& arg) {
         m_state = arg.m_state;
         m_hparams = arg.m_hparams;
         return *this;
     }
 
-    AdamOptimizer(const AdamOptimizer& arg) {
+    AdamBaseOptimizer(const AdamBaseOptimizer& arg) {
         *this = arg;
     }
 
@@ -87,12 +88,41 @@ public:
         m_state.batchAccumulation += statisticalWeight;
 
         if (m_state.batchAccumulation > m_hparams.batchSize) {
-            step(m_state.batchGradient / m_state.batchAccumulation);
+            reinterpret_cast<Parent*>(this)->step(m_state.batchGradient / m_state.batchAccumulation);
 
             m_state.batchGradient = 0;
             m_state.batchAccumulation = 0;
         }
     }
+
+    Float variable() const {
+        return m_state.variable;
+    }
+
+protected:
+    struct State {
+        int iter = 0;
+        Float firstMoment = 0;
+        Float secondMoment = 0;
+        Float secondMomentHat = 0;// Some optimizers need it
+        Float variable = 0;
+
+        Float batchAccumulation = 0;
+        Float batchGradient = 0;
+    } m_state;
+
+    struct Hyperparameters {
+        Float learningRate;
+        int batchSize;
+        Float epsilon;
+        Float beta1;
+        Float beta2;
+    } m_hparams;
+};
+
+class AdamOptimizer : public AdamBaseOptimizer<AdamOptimizer> {
+public:
+    AdamOptimizer(Float learningRate, int batchSize = 1, Float epsilon = 1e-08f, Float beta1 = 0.9f, Float beta2 = 0.999f) : AdamBaseOptimizer(learningRate, batchSize, epsilon, beta1, beta2) {}
 
     void step(Float gradient) {
         ++m_state.iter;
@@ -107,29 +137,81 @@ public:
         // in *extremely* small and large results that are pretty much never necessary in practice.
         m_state.variable = std::min(std::max(m_state.variable, -20.0f), 20.0f);
     }
+};
 
-    Float variable() const {
-        return m_state.variable;
+class AdaMaxOptimizer : public AdamBaseOptimizer<AdamOptimizer> {
+public:
+    AdaMaxOptimizer(Float learningRate, int batchSize = 1, Float epsilon = 1e-08f, Float beta1 = 0.9f, Float beta2 = 0.999f) : AdamBaseOptimizer(learningRate, batchSize, epsilon, beta1, beta2) {}
+
+    void step(Float gradient) {
+        ++m_state.iter;
+         
+        Float actualLearningRate = m_hparams.learningRate / (1 - std::pow(m_hparams.beta1, m_state.iter));
+        m_state.firstMoment = m_hparams.beta1 * m_state.firstMoment + (1 - m_hparams.beta1) * gradient;
+        m_state.secondMoment = std::max(m_hparams.beta2 * m_state.secondMoment, std::abs(gradient));
+        m_state.variable -= actualLearningRate * m_state.firstMoment / (m_state.secondMoment + m_hparams.epsilon);
+
+        // Clamp the variable to the range [-20, 20] as a safeguard to avoid numerical instability:
+        // since the sigmoid involves the exponential of the variable, value of -20 or 20 already yield
+        // in *extremely* small and large results that are pretty much never necessary in practice.
+        m_state.variable = std::min(std::max(m_state.variable, -20.0f), 20.0f);
     }
+};
 
-private:
-    struct State {
-        int iter = 0;
-        Float firstMoment = 0;
-        Float secondMoment = 0;
-        Float variable = 0;
+class NadamOptimizer : public AdamBaseOptimizer<AdamOptimizer> {
+public:
+    NadamOptimizer(Float learningRate, int batchSize = 1, Float epsilon = 1e-08f, Float beta1 = 0.9f, Float beta2 = 0.999f) : AdamBaseOptimizer(learningRate, batchSize, epsilon, beta1, beta2) {}
 
-        Float batchAccumulation = 0;
-        Float batchGradient = 0;
-    } m_state;
+    void step(Float gradient) {
+        ++m_state.iter;
+         
+        m_state.firstMoment = m_hparams.beta1 * m_state.firstMoment + (1 - m_hparams.beta1) * gradient;
+        m_state.secondMoment = m_hparams.beta2 * m_state.secondMoment + (1 - m_hparams.beta2) * gradient * gradient;
+        
+        Float firstMomentH = (m_state.firstMoment + (1-m_hparams.beta1) * gradient) / (1 - std::pow(m_hparams.beta1, m_state.iter));
+        Float secondMomentH = m_state.secondMoment / (1 - std::pow(m_hparams.beta2, m_state.iter));
+        m_state.variable -= m_hparams.learningRate * firstMomentH / (std::sqrt(secondMomentH) + m_hparams.epsilon);
 
-    struct Hyperparameters {
-        Float learningRate;
-        int batchSize;
-        Float epsilon;
-        Float beta1;
-        Float beta2;
-    } m_hparams;
+        // Clamp the variable to the range [-20, 20] as a safeguard to avoid numerical instability:
+        // since the sigmoid involves the exponential of the variable, value of -20 or 20 already yield
+        // in *extremely* small and large results that are pretty much never necessary in practice.
+        m_state.variable = std::min(std::max(m_state.variable, -20.0f), 20.0f);
+    }
+};
+
+class AmsGradOptimizer : public AdamBaseOptimizer<AdamOptimizer> {
+public:
+    AmsGradOptimizer(Float learningRate, int batchSize = 1, Float epsilon = 1e-08f, Float beta1 = 0.9f, Float beta2 = 0.999f) : AdamBaseOptimizer(learningRate, batchSize, epsilon, beta1, beta2) {}
+
+    void step(Float gradient) {
+        ++m_state.iter;
+         
+        m_state.firstMoment = m_hparams.beta1 * m_state.firstMoment + (1 - m_hparams.beta1) * gradient;
+        m_state.secondMoment = m_hparams.beta2 * m_state.secondMoment + (1 - m_hparams.beta2) * gradient * gradient;
+        
+        m_state.secondMomentHat = std::max(m_state.secondMoment, m_state.secondMomentHat);
+        m_state.variable -= m_hparams.learningRate * m_state.firstMoment / (std::sqrt(m_state.secondMomentHat) + m_hparams.epsilon);
+
+        // Clamp the variable to the range [-20, 20] as a safeguard to avoid numerical instability:
+        // since the sigmoid involves the exponential of the variable, value of -20 or 20 already yield
+        // in *extremely* small and large results that are pretty much never necessary in practice.
+        m_state.variable = std::min(std::max(m_state.variable, -20.0f), 20.0f);
+    }
+};
+
+class SGDOptimizer : public AdamBaseOptimizer<AdamOptimizer> {
+public:
+    SGDOptimizer(Float learningRate, int batchSize = 1, Float epsilon = 1e-08f, Float beta1 = 0.9f, Float beta2 = 0.999f) : AdamBaseOptimizer(learningRate, batchSize, epsilon, beta1, beta2) {}
+
+    void step(Float gradient) {
+        ++m_state.iter;
+        m_state.variable -= m_hparams.learningRate * gradient;
+
+        // Clamp the variable to the range [-20, 20] as a safeguard to avoid numerical instability:
+        // since the sigmoid involves the exponential of the variable, value of -20 or 20 already yield
+        // in *extremely* small and large results that are pretty much never necessary in practice.
+        m_state.variable = std::min(std::max(m_state.variable, -20.0f), 20.0f);
+    }
 };
 
 enum class ESampleCombination {
@@ -153,6 +235,14 @@ enum class ESpatialFilter {
 enum class EDirectionalFilter {
     ENearest,
     EBox,
+};
+
+enum class EOptimizer {
+    EAdam,
+    EAdaMax,
+    ENadam,
+    EAmsGrad,
+    ESGD
 };
 
 class QuadTreeNode {
@@ -572,7 +662,10 @@ public:
     DTreeWrapper() {
     }
 
-    void record(const DTreeRecord& rec, EDirectionalFilter directionalFilter, EBsdfSamplingFractionLoss bsdfSamplingFractionLoss) {
+    void record(const DTreeRecord& rec, EDirectionalFilter directionalFilter, EBsdfSamplingFractionLoss bsdfSamplingFractionLoss, EOptimizer optimizer) {
+        // Due to the limited software structure we just asume the optimizer will not be changed while running.
+        selectedOptimizer = optimizer;
+
         if (!rec.isDelta) {
             Float irradiance = rec.radiance / rec.woPdf;
             building.recordIrradiance(dirToCanonical(rec.d), irradiance, rec.statisticalWeight, directionalFilter);
@@ -666,14 +759,30 @@ public:
     }
 
     inline Float bsdfSamplingFraction() const {
-        return bsdfSamplingFraction(bsdfSamplingFractionOptimizer.variable());
+        return bsdfSamplingFraction(bsdfSamplingFractionOptimizer_Adam.variable());
+    }
+
+    inline Float optimizerVariable() const {
+        switch(selectedOptimizer) {
+        default:
+        case EOptimizer::EAdam:
+            return bsdfSamplingFractionOptimizer_Adam.variable();
+        case EOptimizer::EAdaMax:
+            return bsdfSamplingFractionOptimizer_AdaMax.variable();
+        case EOptimizer::ENadam:
+            return bsdfSamplingFractionOptimizer_Nadam.variable();
+        case EOptimizer::EAmsGrad:
+            return bsdfSamplingFractionOptimizer_Nadam.variable();
+        case EOptimizer::ESGD:
+            return bsdfSamplingFractionOptimizer_SGD.variable();
+        }
     }
 
     void optimizeBsdfSamplingFraction(const DTreeRecord& rec, Float ratioPower) {
         m_lock.lock();
 
         // GRADIENT COMPUTATION
-        Float variable = bsdfSamplingFractionOptimizer.variable();
+        Float variable = optimizerVariable();
         Float samplingFraction = bsdfSamplingFraction(variable);
 
         // Loss gradient w.r.t. sampling fraction
@@ -691,8 +800,23 @@ public:
         Float lossGradient = l2RegGradient + dLoss_dVariable;
 
         // ADAM GRADIENT DESCENT
-        bsdfSamplingFractionOptimizer.append(lossGradient, rec.statisticalWeight);
-
+        switch(selectedOptimizer) {
+        case EOptimizer::EAdam:
+            bsdfSamplingFractionOptimizer_Adam.append(lossGradient, rec.statisticalWeight);
+            break;
+        case EOptimizer::EAdaMax:
+            bsdfSamplingFractionOptimizer_AdaMax.append(lossGradient, rec.statisticalWeight);
+            break;
+        case EOptimizer::ENadam:
+            bsdfSamplingFractionOptimizer_Nadam.append(lossGradient, rec.statisticalWeight);
+            break;
+        case EOptimizer::EAmsGrad:
+            bsdfSamplingFractionOptimizer_AmsGrad.append(lossGradient, rec.statisticalWeight);
+            break;
+        case EOptimizer::ESGD:
+            bsdfSamplingFractionOptimizer_SGD.append(lossGradient, rec.statisticalWeight);
+            break;
+        }
         m_lock.unlock();
     }
 
@@ -714,7 +838,12 @@ private:
     DTree building;
     DTree sampling;
 
-    AdamOptimizer bsdfSamplingFractionOptimizer{0.01f};
+    EOptimizer selectedOptimizer;
+    AdamOptimizer bsdfSamplingFractionOptimizer_Adam{0.01f};
+    AdaMaxOptimizer bsdfSamplingFractionOptimizer_AdaMax{0.01f};
+    NadamOptimizer bsdfSamplingFractionOptimizer_Nadam{0.01f};
+    AmsGradOptimizer bsdfSamplingFractionOptimizer_AmsGrad{0.01f};
+    SGDOptimizer bsdfSamplingFractionOptimizer_SGD{0.01f};
 
     class SpinLock {
     public:
@@ -820,11 +949,11 @@ struct STreeNode {
         return lengths[0] * lengths[1] * lengths[2];
     }
 
-    void record(const Point& min1, const Point& max1, Point min2, Vector size2, const DTreeRecord& rec, EDirectionalFilter directionalFilter, EBsdfSamplingFractionLoss bsdfSamplingFractionLoss, std::vector<STreeNode>& nodes) {
+    void record(const Point& min1, const Point& max1, Point min2, Vector size2, const DTreeRecord& rec, EDirectionalFilter directionalFilter, EBsdfSamplingFractionLoss bsdfSamplingFractionLoss, EOptimizer optimizer, std::vector<STreeNode>& nodes) {
         Float w = computeOverlappingVolume(min1, max1, min2, min2 + size2);
         if (w > 0) {
             if (isLeaf) {
-                dTree.record({ rec.d, rec.radiance, rec.product, rec.woPdf, rec.bsdfPdf, rec.dTreePdf, rec.statisticalWeight * w, rec.isDelta }, directionalFilter, bsdfSamplingFractionLoss);
+                dTree.record({ rec.d, rec.radiance, rec.product, rec.woPdf, rec.bsdfPdf, rec.dTreePdf, rec.statisticalWeight * w, rec.isDelta }, directionalFilter, bsdfSamplingFractionLoss, optimizer);
             } else {
                 size2[axis] /= 2;
                 for (int i = 0; i < 2; ++i) {
@@ -832,7 +961,7 @@ struct STreeNode {
                         min2[axis] += size2[axis];
                     }
 
-                    nodes[children[i]].record(min1, max1, min2, size2, rec, directionalFilter, bsdfSamplingFractionLoss, nodes);
+                    nodes[children[i]].record(min1, max1, min2, size2, rec, directionalFilter, bsdfSamplingFractionLoss, optimizer, nodes);
                 }
             }
         }
@@ -932,14 +1061,14 @@ public:
         }
     }
 
-    void record(const Point& p, const Vector& dTreeVoxelSize, DTreeRecord rec, EDirectionalFilter directionalFilter, EBsdfSamplingFractionLoss bsdfSamplingFractionLoss) {
+    void record(const Point& p, const Vector& dTreeVoxelSize, DTreeRecord rec, EDirectionalFilter directionalFilter, EBsdfSamplingFractionLoss bsdfSamplingFractionLoss, EOptimizer optimizer) {
         Float volume = 1;
         for (int i = 0; i < 3; ++i) {
             volume *= dTreeVoxelSize[i];
         }
 
         rec.statisticalWeight /= volume;
-        m_nodes[0].record(p - dTreeVoxelSize * 0.5f, p + dTreeVoxelSize * 0.5f, m_aabb.min, m_aabb.getExtents(), rec, directionalFilter, bsdfSamplingFractionLoss, m_nodes);
+        m_nodes[0].record(p - dTreeVoxelSize * 0.5f, p + dTreeVoxelSize * 0.5f, m_aabb.min, m_aabb.getExtents(), rec, directionalFilter, bsdfSamplingFractionLoss, optimizer, m_nodes);
     }
 
     void dump(BlobWriter& blob) const {
@@ -1061,6 +1190,21 @@ public:
             m_bsdfSamplingFractionLoss = EBsdfSamplingFractionLoss::EKL;
         } else if (m_bsdfSamplingFractionLossStr == "var") {
             m_bsdfSamplingFractionLoss = EBsdfSamplingFractionLoss::EVariance;
+        } else {
+            Assert(false);
+        }
+
+        m_optimizerStr = props.getString("optimizer", "adam");
+        if (m_optimizerStr == "adam") {
+            m_optimizer = EOptimizer::EAdam;
+        } else if (m_optimizerStr == "adamax") {
+            m_optimizer = EOptimizer::EAdaMax;
+        } else if (m_optimizerStr == "nadam") {
+            m_optimizer = EOptimizer::ENadam;
+        } else if (m_optimizerStr == "amsgrad") {
+            m_optimizer = EOptimizer::EAmsGrad;
+        } else if (m_optimizerStr == "sgd") {
+            m_optimizer = EOptimizer::ESGD;
         } else {
             Assert(false);
         }
@@ -1727,7 +1871,7 @@ public:
                 radiance += r;
             }
 
-            void commit(STree& sdTree, Float statisticalWeight, ESpatialFilter spatialFilter, EDirectionalFilter directionalFilter, EBsdfSamplingFractionLoss bsdfSamplingFractionLoss, Sampler* sampler) {
+            void commit(STree& sdTree, Float statisticalWeight, ESpatialFilter spatialFilter, EDirectionalFilter directionalFilter, EBsdfSamplingFractionLoss bsdfSamplingFractionLoss, EOptimizer optimizer, Sampler* sampler) {
                 if (!(woPdf > 0) || !radiance.isValid() || !bsdfVal.isValid()) {
                     return;
                 }
@@ -1741,7 +1885,7 @@ public:
                 DTreeRecord rec{ ray.d, localRadiance.average(), product.average(), woPdf, bsdfPdf, dTreePdf, statisticalWeight, isDelta };
                 switch (spatialFilter) {
                     case ESpatialFilter::ENearest:
-                        dTree->record(rec, directionalFilter, bsdfSamplingFractionLoss);
+                        dTree->record(rec, directionalFilter, bsdfSamplingFractionLoss, optimizer);
                         break;
                     case ESpatialFilter::EStochasticBox:
                         {
@@ -1757,12 +1901,12 @@ public:
                             Point origin = sdTree.aabb().clip(ray.o + offset);
                             splatDTree = sdTree.dTreeWrapper(origin);
                             if (splatDTree) {
-                                splatDTree->record(rec, directionalFilter, bsdfSamplingFractionLoss);
+                                splatDTree->record(rec, directionalFilter, bsdfSamplingFractionLoss, optimizer);
                             }
                             break;
                         }
                     case ESpatialFilter::EBox:
-                        sdTree.record(ray.o, dTreeVoxelSize, rec, directionalFilter, bsdfSamplingFractionLoss);
+                        sdTree.record(ray.o, dTreeVoxelSize, rec, directionalFilter, bsdfSamplingFractionLoss, optimizer);
                         break;
                 }
             }
@@ -2011,7 +2155,7 @@ public:
                                         false,
                                     };
 
-                                    v.commit(*m_sdTree, 0.5f, m_spatialFilter, m_directionalFilter, m_isBuilt ? m_bsdfSamplingFractionLoss : EBsdfSamplingFractionLoss::ENone, rRec.sampler);
+                                    v.commit(*m_sdTree, 0.5f, m_spatialFilter, m_directionalFilter, m_isBuilt ? m_bsdfSamplingFractionLoss : EBsdfSamplingFractionLoss::ENone, m_optimizer, rRec.sampler);
                                 }
                             }
 
@@ -2149,7 +2293,7 @@ public:
 
         if (nVertices > 0 && !m_isFinalIter) {
             for (int i = 0; i < nVertices; ++i) {
-                vertices[i].commit(*m_sdTree, m_nee == EKickstart && m_doNee ? 0.5f : 1.0f, m_spatialFilter, m_directionalFilter, m_isBuilt ? m_bsdfSamplingFractionLoss : EBsdfSamplingFractionLoss::ENone, rRec.sampler);
+                vertices[i].commit(*m_sdTree, m_nee == EKickstart && m_doNee ? 0.5f : 1.0f, m_spatialFilter, m_directionalFilter, m_isBuilt ? m_bsdfSamplingFractionLoss : EBsdfSamplingFractionLoss::ENone, m_optimizer, rRec.sampler);
             }
         }
 
@@ -2364,6 +2508,19 @@ private:
     */
     std::string m_directionalFilterStr;
     EDirectionalFilter m_directionalFilter;
+
+    /**
+        The optimizer to use when optimizing per step.
+        The following values are valid:
+        - "adam":   improves upon Mueller et al. [2017]
+                    at nearly no computational cost.
+        - "adamax": improves upon Mueller et al. [2017]
+                    at nearly no computational cost.
+        Default     = "adam" (for reproducibility)
+        Recommended = "adam"
+    */
+    std::string m_optimizerStr;
+    EOptimizer m_optimizer;
 
     /**
         Leaf nodes of the spatial binary tree are subdivided if the number of samples
